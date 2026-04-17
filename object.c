@@ -94,35 +94,106 @@ int object_exists(const ObjectID *id) {
 //
 // Returns 0 on success, -1 on error.
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
-    // TODO: Implement
-    (void)type; (void)data; (void)len; (void)id_out;
-    return -1;
+    char header[64];
+    const char *tname =
+        (type == OBJ_BLOB) ? "blob" :
+        (type == OBJ_TREE) ? "tree" : "commit";
+
+    int hlen = snprintf(header, sizeof(header), "%s %zu", tname, len) + 1;
+
+    size_t total = hlen + len;
+    unsigned char *full = malloc(total);
+    if (!full) return -1;
+
+    memcpy(full, header, hlen);
+    memcpy(full + hlen, data, len);
+
+    compute_hash(full, total, id_out);
+
+    if (object_exists(id_out)) {
+        free(full);
+        return 0;
+    }
+
+    char hex[HASH_HEX_SIZE + 1];
+    hash_to_hex(id_out, hex);
+
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/%.2s", OBJECTS_DIR, hex);
+
+    mkdir(".pes", 0755);
+    mkdir(OBJECTS_DIR, 0755);
+    mkdir(dir, 0755);   // ignore if already exists
+
+    char path[512];
+    object_path(id_out, path, sizeof(path));
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        free(full);
+        return -1;
+    }
+
+    fwrite(full, 1, total, f);
+    fclose(f);
+    free(full);
+
+    return 0;
 }
 
-// Read an object from the store.
-//
-// Steps:
-//   1. Build the file path from the hash using object_path()
-//   2. Open and read the entire file
-//   3. Parse the header to extract the type string and size
-//   4. Verify integrity: recompute the SHA-256 of the file contents
-//      and compare to the expected hash (from *id). Return -1 if mismatch.
-//   5. Set *type_out to the parsed ObjectType
-//   6. Allocate a buffer, copy the data portion (after the \0), set *data_out and *len_out
-//
-// HINTS - Useful syscalls and functions for this phase:
-//   - object_path        : getting the target file path
-//   - fopen, fread, fseek: reading the file into memory
-//   - memchr             : safely finding the '\0' separating header and data
-//   - strncmp            : parsing the type string ("blob", "tree", "commit")
-//   - compute_hash       : re-hashing the read data for integrity verification
-//   - memcmp             : comparing the computed hash against the requested hash
-//   - malloc, memcpy     : allocating and returning the extracted data
-//
-// The caller is responsible for calling free(*data_out).
-// Returns 0 on success, -1 on error (file not found, corrupt, etc.).
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
-    // TODO: Implement
-    (void)id; (void)type_out; (void)data_out; (void)len_out;
-    return -1;
+    char path[512];
+    object_path(id, path, sizeof(path));
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    fseek(f, 0, SEEK_END);
+    size_t full_len = (size_t)ftell(f);
+    rewind(f);
+
+    uint8_t *full = malloc(full_len);
+    if (!full) { fclose(f); return -1; }
+    if (fread(full, 1, full_len, f) != full_len) { free(full); fclose(f); return -1; }
+    fclose(f);
+
+    // Integrity check
+    ObjectID computed;
+    compute_hash(full, full_len, &computed);
+    if (memcmp(computed.hash, id->hash, HASH_SIZE) != 0) { free(full); return -1; }
+
+    // Parse header: find the '\0' separator
+    uint8_t *null_pos = memchr(full, '\0', full_len);
+    if (!null_pos) { free(full); return -1; }
+
+    char header[64];
+    size_t hdr_len = (size_t)(null_pos - full);
+    if (hdr_len >= sizeof(header)) { free(full); return -1; }
+    memcpy(header, full, hdr_len);
+    header[hdr_len] = '\0';
+
+    // Parse type
+    if      (strncmp(header, "blob",   4) == 0) *type_out = OBJ_BLOB;
+    else if (strncmp(header, "tree",   4) == 0) *type_out = OBJ_TREE;
+    else if (strncmp(header, "commit", 6) == 0) *type_out = OBJ_COMMIT;
+    else { free(full); return -1; }
+
+    // Parse size (after the space in the header)
+    char *space = strchr(header, ' ');
+    if (!space) { free(full); return -1; }
+    size_t declared_size = (size_t)strtoul(space + 1, NULL, 10);
+
+    // Copy data portion
+    uint8_t *data_start = null_pos + 1;
+    size_t data_len = full_len - hdr_len - 1;
+    if (data_len != declared_size) { free(full); return -1; }
+
+    *data_out = malloc(data_len + 1);
+    if (!*data_out) { free(full); return -1; }
+    memcpy(*data_out, data_start, data_len);
+    ((uint8_t *)*data_out)[data_len] = '\0';
+    *len_out = data_len;
+
+    free(full);
+    return 0;
 }
