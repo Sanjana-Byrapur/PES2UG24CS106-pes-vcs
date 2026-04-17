@@ -193,18 +193,22 @@ static int write_tree_level(IndexEntry *entries, int count, const char *prefix, 
     return rc;
 }
 
+#include "index.h"
+
+int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
+
+static int cmp_index_entries(const void *a, const void *b) {
+    const IndexEntry *ea = (const IndexEntry *)a;
+    const IndexEntry *eb = (const IndexEntry *)b;
+    return strcmp(ea->path, eb->path);
+}
+
+
 int tree_from_index(ObjectID *id_out) {
     Index index;
-    index.count = 0;
     if (index_load(&index) != 0) return -1;
-    if (index.count == 0) {
-        // Empty tree
-        Tree empty; empty.count = 0;
-        void *tdata; size_t tlen;
-        if (tree_serialize(&empty, &tdata, &tlen) != 0) return -1;
-        int rc = object_write(OBJ_TREE, tdata, tlen, id_out);
-        free(tdata);
-        return rc;
-    }
+
+    qsort(index.entries, index.count, sizeof(IndexEntry), cmp_index_entries);
+
     return write_tree_level(index.entries, index.count, "", id_out);
 }
